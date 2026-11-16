@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,8 +91,9 @@ func configureManagedRouting(document, current jsonObject, profile managedProfil
 	}
 	routing["balancers"] = balancers
 
+	const defaultProbe = "https://connectivitycheck.gstatic.com/generate_204"
 	ping := jsonObject{
-		"destination": "https://connectivitycheck.gstatic.com/generate_204",
+		"destination": defaultProbe,
 		"interval":    "20s",
 		"sampling":    1,
 		"timeout":     "5s",
@@ -106,12 +108,14 @@ func configureManagedRouting(document, current jsonObject, profile managedProfil
 			}
 		}
 	} else if observatory, ok := current["observatory"].(map[string]any); ok {
-		if destination, ok := observatory["probeURL"].(string); ok && destination != "" {
-			ping["destination"] = destination
-		}
 		if interval := xrayDuration(observatory["probeInterval"]); interval != "" {
 			ping["interval"] = interval
 		}
+	}
+	ping["destination"] = defaultProbe
+	if probe, err := url.Parse(strings.TrimSpace(profile.probeURL)); err == nil &&
+		(probe.Scheme == "http" || probe.Scheme == "https") && probe.Hostname() != "" && probe.User == nil {
+		ping["destination"] = probe.String()
 	}
 	delete(document, "observatory")
 	document["burstObservatory"] = jsonObject{

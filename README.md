@@ -121,6 +121,34 @@ curl -fsSL https://github.com/DalasDV/xkeen-watcher-json/releases/latest/downloa
 обновления сохранённой подписки используйте
 `/opt/sbin/xkeen-subscription-watcher refresh`.
 
+### Пилотная версия и переключение канала
+
+Запустите из Entware:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/DalasDV/xkeen-watcher-json/dev/install.sh \
+  -o /tmp/xkeen-watcher-install.sh &&
+  sh /tmp/xkeen-watcher-install.sh --channel dev --update
+```
+
+`--channel dev` загружает пилотную сборку. `--channel main` загружает
+стабильный релиз. `--update` заменяет бинарник действующей установки и
+сохраняет HWID, подписку, конфигурацию Xray и cron. Запустите `refresh`
+для немедленного обновления подписки. Для установки с нуля запустите скрипт
+без `--update`, чтобы открыть мастер.
+
+Для планового переезда Watcher понимает заголовок `new-domain`. Мастер также
+принимает необязательную HTTPS-ссылку на публичный JSON с полем `domain`.
+Watcher обращается к этому файлу при сетевой ошибке или ответе `5xx` от
+сервера подписок, сохраняя локальные путь и параметры подписки. Новый адрес
+сохраняется после успешной загрузки и применения. Сам файл восстановления
+должен содержать только домен, без персональной ссылки и HWID. Enter в мастере
+сохраняет существующую настройку, `-` удаляет её.
+
+В режиме автобалансировки `check-url-via-proxy` задаёт адрес HTTP-проверки.
+При отсутствии допустимого URL используется
+`https://connectivitycheck.gstatic.com/generate_204`.
+
 При обновлении старый управляемый файл `04_outbounds.resist.json` переходит
 на имя `04_outbounds.watcher.json`. Watcher сохраняет копию в `watcher-backup`
 и сообщает о конфликте, если оба файла уже существуют.

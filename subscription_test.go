@@ -10,6 +10,31 @@ import (
 	"testing"
 )
 
+func TestSubscriptionAtDomain(t *testing.T) {
+	original := "https://old.example:8443/sub/a%2Fb?key=a+b#anchor"
+	assertDeepEqual(t, subscriptionAtDomain(original, "new.example"), "https://new.example:8443/sub/a%2Fb?key=a+b#anchor")
+	for _, invalid := range []string{"old.example", "https://new.example", "new.example:443", "new.example/path", "new.example@other.example", "127.0.0.1"} {
+		assertDeepEqual(t, subscriptionAtDomain(original, invalid), "")
+	}
+}
+
+func TestManagedSubscriptionUsesResponseProbe(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Hwid") == "" {
+			t.Error("subscription request did not carry HWID")
+		}
+		w.Header().Set("Check-Url-Via-Proxy", "https://probe.example/204")
+		w.Write([]byte(managedFeed))
+	}))
+	defer server.Close()
+	profile, address, err := managedSubscriptionProfile(managedSubscription{URL: server.URL}, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, profile.probeURL, "https://probe.example/204")
+	assertDeepEqual(t, address, server.URL)
+}
+
 func TestXraySubscriptionSkipsOnlyReferencedBalancers(t *testing.T) {
 	const outbound = `"outbounds":[{"tag":"node","protocol":"hysteria","settings":{}}]`
 	const balancer = `"balancers":[{"tag":"pool"}]`

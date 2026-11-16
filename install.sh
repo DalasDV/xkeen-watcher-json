@@ -6,7 +6,7 @@ PATH="${PATH:-/bin:/usr/bin}:/opt/bin:/opt/sbin:/bin:/sbin:/usr/bin:/usr/sbin"
 export PATH
 
 REPO=DalasDV/xkeen-watcher-json
-RELEASE_URL="https://github.com/$REPO/releases/latest/download"
+RELEASE_TAG=latest
 INSTALL_DIR=/opt/sbin
 WATCHER="$INSTALL_DIR/xkeen-subscription-watcher"
 BACKUP_ROOT=/opt/etc/xkeen-subscription-watcher/backups
@@ -121,7 +121,22 @@ download_asset() {
     fail "Не удалось скачать $asset. Проверьте доступ роутера к GitHub и повторите установку."
 }
 
-[ "$#" -eq 0 ] || fail "Использование: sh install.sh"
+UPDATE_ONLY=0
+CHANNEL=
+usage='Использование: sh install.sh [--channel dev|main] [--update]'
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --update) UPDATE_ONLY=1 ;;
+        --channel)
+            [ "$#" -ge 2 ] || fail "$usage"
+            CHANNEL=$2
+            case "$CHANNEL" in dev|main) ;; *) fail "$usage" ;; esac
+            shift ;;
+        -h|--help) echo "$usage"; exit 0 ;;
+        *) fail "$usage" ;;
+    esac
+    shift
+done
 
 command -v curl >/dev/null 2>&1 || fail 'Нет curl. В Entware выполните: opkg update && opkg install curl ca-certificates'
 if command -v sha256sum >/dev/null 2>&1; then
@@ -136,6 +151,24 @@ for command_name in awk cat chmod cp dd mkdir mktemp mv od rm sleep uname wc; do
 done
 [ -d "$INSTALL_DIR" ] && [ -w "$INSTALL_DIR" ] || fail "Каталог $INSTALL_DIR недоступен для записи. Запустите из Entware."
 [ ! -d "$WATCHER" ] || fail "Путь $WATCHER занят каталогом."
+[ "$UPDATE_ONLY" -eq 0 ] || [ -e "$WATCHER" ] || fail 'Watcher ещё не установлен. Запустите установщик без --update.'
+
+case "$CHANNEL" in
+    main) RELEASE_TAG=latest ;;
+    dev)
+        RELEASE_TAG=$(curl -fsSL --connect-timeout 15 --max-time 30 "https://raw.githubusercontent.com/$REPO/dev/dev-release") ||
+            fail 'Не удалось получить тег текущего DEV-релиза.'
+        case "$RELEASE_TAG" in
+            v[0-9]*-dev.[0-9]*) ;;
+            *) fail 'Некорректный тег DEV-релиза.' ;;
+        esac
+        case "$RELEASE_TAG" in *[!a-zA-Z0-9.-]*) fail 'Некорректный тег DEV-релиза.' ;; esac ;;
+esac
+if [ "$RELEASE_TAG" = latest ]; then
+    RELEASE_URL="https://github.com/$REPO/releases/latest/download"
+else
+    RELEASE_URL="https://github.com/$REPO/releases/download/$RELEASE_TAG"
+fi
 
 ARCH=$(detect_arch)
 ASSET="xkeen-subscription-watcher-linux-$ARCH"
@@ -163,6 +196,9 @@ chmod 755 "$STAGE/$ASSET"
 echo "Проверяю, что новая сборка запускается."
 VERSION=$("$STAGE/$ASSET" version 2>&1) || fail 'Новый бинарник не запустился. Проверьте архитектуру и версию Entware.'
 [ -n "$VERSION" ] || fail 'Новый бинарник не сообщил версию.'
+if [ "$RELEASE_TAG" != latest ] && [ "$VERSION" != "$RELEASE_TAG" ]; then
+    fail "Ожидалась сборка $RELEASE_TAG, получена $VERSION."
+fi
 
 set --
 if [ -e "$WATCHER" ] || [ -L "$WATCHER" ]; then
@@ -182,7 +218,11 @@ fi
 
 mv -f "$STAGE/$ASSET" "$WATCHER"
 echo "Установлен $WATCHER ($VERSION)."
-if [ -t 0 ]; then
+if [ "$UPDATE_ONLY" -eq 1 ]; then
+    echo 'Бинарник обновлён. Настройки, HWID и расписание сохранены.'
+    echo "Для немедленного обновления подписки: $WATCHER refresh"
+    echo "Для запуска мастера: $WATCHER setup"
+elif [ -t 0 ]; then
     if command -v crontab >/dev/null 2>&1; then
         "$WATCHER" setup
     else

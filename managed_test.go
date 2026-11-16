@@ -137,6 +137,30 @@ func TestManagedCronMigratesOnlyMatchingJob(t *testing.T) {
 	assertDeepEqual(t, string(got), expected)
 }
 
+func TestManagedProbeURL(t *testing.T) {
+	profile, err := compileManagedSubscription(managedFeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := jsonObject{"burstObservatory": jsonObject{"pingConfig": jsonObject{
+		"destination": "https://old.example/204", "sampling": 3,
+	}}}
+	for header, want := range map[string]string{
+		"https://probe.example/204": "https://probe.example/204",
+		"":                          "https://connectivitycheck.gstatic.com/generate_204",
+		"ftp://probe.example/204":   "https://connectivitycheck.gstatic.com/generate_204",
+	} {
+		profile.probeURL = header
+		document := jsonObject{}
+		if err := configureManagedRouting(document, current, profile); err != nil {
+			t.Fatal(err)
+		}
+		ping := document["burstObservatory"].(jsonObject)["pingConfig"].(jsonObject)
+		assertDeepEqual(t, ping["destination"], want)
+		assertDeepEqual(t, ping["sampling"], 3)
+	}
+}
+
 func TestManagedSetupRefreshWithXray(t *testing.T) {
 	xray := os.Getenv("XKEEN_TEST_XRAY")
 	if xray == "" {
@@ -207,6 +231,8 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 
 	var response atomic.Value
 	response.Store(managedFeed)
+	var probeURL atomic.Value
+	probeURL.Store("")
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hwid, err := os.ReadFile(filepath.Join(paths.stateDir, "hwid"))
@@ -214,11 +240,14 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 			t.Error("subscription request must carry the persisted HWID")
 		}
 		requests.Add(1)
+		if probe := probeURL.Load().(string); probe != "" {
+			w.Header().Set("check-url-via-proxy", probe)
+		}
 		io.WriteString(w, response.Load().(string))
 	}))
 	defer server.Close()
 	var messages bytes.Buffer
-	if err := paths.update(server.URL, modeBalance, &messages); err != nil {
+	if err := paths.update(server.URL, modeBalance, "", &messages); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(messages.String(), "setup") || !strings.Contains(messages.String(), "XKeen перезапущен.") || strings.Contains(messages.String(), server.URL) {
@@ -240,7 +269,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatal("expected one Hysteria, one XHTTP and loopback")
 	}
 	got := string(read(routePath))
-	for _, want := range []string{"local.example", managedFallbackIn, "http://legacy.example.com/204", `"balancerTag": "old-vpn"`, `"tag": "old-vpn"`} {
+	for _, want := range []string{"local.example", managedFallbackIn, "https://connectivitycheck.gstatic.com/generate_204", `"balancerTag": "old-vpn"`, `"tag": "old-vpn"`} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("routing missing %q", want)
 		}
@@ -260,7 +289,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	assertDeepEqual(t, string(read(filepath.Join(snapshot, "03_inbounds.json"))), `{"inbounds":[]}`)
 	assertDeepEqual(t, string(read(filepath.Join(snapshot, "config-notes.txt"))), "backup me")
 
-	if err := paths.update("", "", io.Discard); err != nil {
+	if err := paths.update("", "", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	assertDeepEqual(t, string(read(log)), "restart\n")
@@ -268,11 +297,11 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	outputPath := filepath.Join(paths.configDir, "04_outbounds.watcher.json")
 	response.Store(strings.ReplaceAll(managedFeed, "192.0.2.10", "192.0.2.15"))
 	write(fail, "", 0600)
-	if err := paths.update("", "", io.Discard); err == nil {
+	if err := paths.update("", "", "", io.Discard); err == nil {
 		t.Fatal("expected restart to fail")
 	}
 	assertDeepEqual(t, read(outputPath), initialOutput)
-	if err := paths.update("", "", io.Discard); err != nil {
+	if err := paths.update("", "", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(read(outputPath), []byte("192.0.2.15")) {
@@ -283,15 +312,15 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	write(outputPath, strings.Replace(string(read(outputPath)), namedTag, "hy2-5", 1), 0600)
 	routing := strings.Replace(string(read(routePath)), `"rules": [`, `"rules": [
 		{"type":"field","sourceIP":["192.168.1.99"],"outboundTag":"hy2-5"},`, 1)
-	routing = strings.Replace(routing, "http://legacy.example.com/204", "http://probe.example.com/204", 1)
+	probeURL.Store("http://probe.example.com/204")
 	write(routePath, routing, 0600)
 	write(state, strings.Replace(string(read(state)), "{", `{"profile":"Example Auto",`, 1), 0600)
-	if err := paths.update("", "", io.Discard); err != nil {
+	if err := paths.update("", "", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	got = string(read(routePath))
 	if !strings.Contains(got, `"outboundTag": "`+namedTag+`"`) || !strings.Contains(got, "http://probe.example.com/204") {
-		t.Fatal("refresh did not migrate the fixed outbound or preserve the local probe")
+		t.Fatal("refresh did not migrate the fixed outbound or apply the probe header")
 	}
 
 	legacyOutput := filepath.Join(paths.configDir, "04_outbounds.resist.json")
@@ -302,7 +331,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	legacyState := strings.Replace(string(read(state)), `"tag": "watcher"`, `"tag": "resist"`, 1)
 	write(state, legacyState, 0600)
 	write(outputPath, "another configuration", 0600)
-	if err := paths.update("", "", io.Discard); err == nil || !strings.Contains(err.Error(), "уже существуют") {
+	if err := paths.update("", "", "", io.Discard); err == nil || !strings.Contains(err.Error(), "уже существуют") {
 		t.Fatalf("expected a filename conflict, got %v", err)
 	}
 	assertDeepEqual(t, string(read(outputPath)), "another configuration")
@@ -310,7 +339,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatal(err)
 	}
 	write(fail, "", 0600)
-	if err := paths.update("", "", io.Discard); err == nil {
+	if err := paths.update("", "", "", io.Discard); err == nil {
 		t.Fatal("expected rollback after restart failure during rename")
 	}
 	assertDeepEqual(t, read(legacyOutput), expected)
@@ -318,7 +347,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
 		t.Fatalf("new file should be removed during rollback: %v", err)
 	}
-	if err := paths.update("", "", io.Discard); err != nil {
+	if err := paths.update("", "", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	assertDeepEqual(t, read(outputPath), expected)
@@ -336,7 +365,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 	restarts := read(log)
 	before := read(routePath)
 	messages.Reset()
-	if err := paths.update(server.URL, modeOutbounds, &messages); err != nil {
+	if err := paths.update(server.URL, modeOutbounds, "", &messages); err != nil {
 		t.Fatal(err)
 	}
 	assertDeepEqual(t, read(routePath), before)
@@ -349,7 +378,7 @@ if [ -e "$TEST_FAIL" ]; then rm "$TEST_FAIL"; exit 1; fi
 		t.Fatalf("expected separate backups after rerunning setup: %v", err)
 	}
 	response.Store(strings.ReplaceAll(managedFeed, "192.0.2.10", "192.0.2.16"))
-	if err := paths.update("", "", io.Discard); err != nil {
+	if err := paths.update("", "", "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	assertDeepEqual(t, read(routePath), before)

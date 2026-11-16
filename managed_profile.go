@@ -28,6 +28,7 @@ type profileBalancer struct {
 }
 
 type managedProfile struct {
+	probeURL  string
 	outbounds []map[string]any
 	primary   profileBalancer
 	backup    profileBalancer

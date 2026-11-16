@@ -24,9 +24,10 @@ const (
 )
 
 type managedSubscription struct {
-	URL  string `json:"url"`
-	Tag  string `json:"tag"`
-	Mode string `json:"mode"`
+	URL         string `json:"url"`
+	Tag         string `json:"tag"`
+	Mode        string `json:"mode"`
+	RecoveryURL string `json:"recoveryUrl,omitempty"`
 }
 
 type managedPaths struct {
@@ -64,7 +65,18 @@ func (p managedPaths) newSetupCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return p.update(address, mode, out)
+			fmt.Fprint(out, "HTTPS-ссылка на JSON для восстановления подписки [Enter — сохранить текущую, - — удалить]: ")
+			recovery, err := readSetupLine(in)
+			if err != nil {
+				return err
+			}
+			if recovery != "" && recovery != "-" {
+				file, err := url.Parse(recovery)
+				if err != nil || file.Scheme != "https" || file.Hostname() == "" || file.User != nil {
+					return fmt.Errorf("нужна HTTPS-ссылка на публичный файл восстановления")
+				}
+			}
+			return p.update(address, mode, recovery, out)
 		},
 	}
 }
@@ -75,7 +87,7 @@ func (p managedPaths) newRefreshCmd() *cobra.Command {
 		Short: "Обновить настроенную подписку",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return p.update("", "", cmd.OutOrStdout())
+			return p.update("", "", "", cmd.OutOrStdout())
 		},
 	}
 }
@@ -91,7 +103,9 @@ func readSetupLine(in *bufio.Reader) (string, error) {
 func readSetupMode(in *bufio.Reader, out io.Writer) (string, error) {
 	for {
 		fmt.Fprintln(out, "1. Заменить балансировщики и мониторинг Xray, сохранив правила маршрутизации.")
+		fmt.Fprintln(out, "   Мастер сделает бэкап и сохранит порядок правил. Старые имена балансировщиков могут вести в новый пул.")
 		fmt.Fprintln(out, "2. Только создать файл с серверами подписки.")
+		fmt.Fprintln(out, "   Применить файл нужно вручную. Watcher не перезапустит XKeen.")
 		fmt.Fprint(out, "Выберите 1 или 2 [2]: ")
 		answer, err := readSetupLine(in)
 		if err != nil {
@@ -119,7 +133,7 @@ func compileManagedSubscription(body string) (managedProfile, error) {
 	return ordinaryManagedProfile(parseLinkOutbounds(body, managedTag, false))
 }
 
-func (p managedPaths) update(address, mode string, out io.Writer) error {
+func (p managedPaths) update(address, mode, recovery string, out io.Writer) error {
 	if err := os.MkdirAll(p.stateDir, 0700); err != nil {
 		return err
 	}
@@ -147,6 +161,13 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 	if isSetup {
 		settings.URL = address
 		settings.Mode = mode
+		switch recovery {
+		case "-":
+			settings.RecoveryURL = ""
+		case "":
+		default:
+			settings.RecoveryURL = recovery
+		}
 	} else if settings.URL == "" {
 		return fmt.Errorf("сначала запустите %s setup", watcherPath)
 	}
@@ -165,14 +186,11 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 			}
 		}
 	}
-	body, err := fetchSubscription(subscription{tag: managedTag, url: settings.URL}, p.stateDir)
+	profile, resolvedURL, err := managedSubscriptionProfile(settings, p.stateDir)
 	if err != nil {
 		return fmt.Errorf("не удалось получить подписку: %w", err)
 	}
-	profile, err := compileManagedSubscription(body)
-	if err != nil {
-		return err
-	}
+	migrated := resolvedURL != settings.URL
 	var oldCron, newCron []byte
 	if isSetup {
 		oldCron, err = loadCrontab()
@@ -184,6 +202,7 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 			return err
 		}
 	}
+	settings.URL = resolvedURL
 	previousTag := settings.Tag
 	if previousTag == "resist" {
 		settings.Tag = managedTag
@@ -194,12 +213,14 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 		return err
 	}
 	configChanged := len(files) != 0
-	if isSetup || renaming {
+	if isSetup || renaming || migrated {
 		data, err := encodeXrayObject(settings)
 		if err != nil {
 			return err
 		}
 		files = append(files, routerChange{before: previous, data: data, mode: 0600})
+	}
+	if isSetup || renaming {
 		backup, err := p.backupXrayConfig()
 		if err != nil {
 			return fmt.Errorf("не удалось скопировать конфиги Xray: %w", err)
@@ -230,6 +251,9 @@ func (p managedPaths) update(address, mode string, out io.Writer) error {
 	}
 	if restart {
 		fmt.Fprintln(out, "XKeen перезапущен.")
+	}
+	if migrated {
+		fmt.Fprintln(out, "Рабочий домен подписки обновлён.")
 	}
 	return nil
 }

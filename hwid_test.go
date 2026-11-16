@@ -142,10 +142,10 @@ func TestSubscriptionRequestSendsHWID(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if body, err := doHTTPRequest(server.URL, hwid, false); err != nil || body != "subscription" {
-		t.Fatalf("unexpected response: %q, %v", body, err)
+	if response, err := doSubscriptionRequest(server.URL, hwid, false); err != nil || response.body != "subscription" {
+		t.Fatalf("unexpected response: %q, %v", response.body, err)
 	}
-	if _, err := doHTTPRequest(server.URL+"/limit", hwid, false); !errors.Is(err, errHWIDLimit) {
+	if _, err := doSubscriptionRequest(server.URL+"/limit", hwid, false); !errors.Is(err, errHWIDLimit) {
 		t.Fatalf("expected a device limit error, got %v", err)
 	}
 }

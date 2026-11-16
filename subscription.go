@@ -23,27 +23,40 @@ var (
 	errHWIDLimit    = errors.New("в подписке достигнут лимит устройств")
 )
 
+type subscriptionResponse struct {
+	body   string
+	header http.Header
+}
+
+var errSubscriptionUnavailable = errors.New("сервер подписки недоступен")
+
 func fetchSubscription(sub subscription, stateDir string) (string, error) {
+	response, err := fetchSubscriptionResponse(sub, stateDir)
+	return response.body, err
+}
+
+func fetchSubscriptionResponse(sub subscription, stateDir string) (subscriptionResponse, error) {
 	hwid, err := loadHWID(stateDir, routerHWID)
 	if err != nil {
-		return "", fmt.Errorf("не удалось загрузить или сохранить HWID: %w", err)
+		return subscriptionResponse{}, fmt.Errorf("не удалось загрузить или сохранить HWID: %w", err)
 	}
-	body, err := doHTTPRequest(sub.url, hwid, false)
-	if errors.Is(err, errHWIDRequired) || errors.Is(err, errHWIDLimit) {
-		return "", err
+	response, err := doSubscriptionRequest(sub.url, hwid, false)
+	if err != nil && !errors.Is(err, errSubscriptionUnavailable) {
+		return subscriptionResponse{}, err
 	}
 	if err != nil {
 		log.Printf("Не удалось получить подписку %q без прокси, пробуем с прокси: %v", sub.tag, err)
-		body, err = doHTTPRequest(sub.url, hwid, true)
+		response, err = doSubscriptionRequest(sub.url, hwid, true)
 		if err != nil {
-			return "", err
+			return subscriptionResponse{}, err
 		}
 	}
 
-	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(body), "\uFEFF")), nil
+	response.body = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(response.body), "\uFEFF"))
+	return response, nil
 }
 
-func doHTTPRequest(requestURL, hwid string, withProxy bool) (string, error) {
+func doSubscriptionRequest(requestURL, hwid string, withProxy bool) (subscriptionResponse, error) {
 	transport := &http.Transport{}
 	defer transport.CloseIdleConnections()
 	if withProxy {
@@ -69,7 +82,7 @@ func doHTTPRequest(requestURL, hwid string, withProxy bool) (string, error) {
 
 	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("неверный URL подписки")
+		return subscriptionResponse{}, fmt.Errorf("неверный URL подписки")
 	}
 	req.Header.Set("User-Agent", subscriptionUserAgent)
 	if hwid != "" {
@@ -77,26 +90,29 @@ func doHTTPRequest(requestURL, hwid string, withProxy bool) (string, error) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("не удалось выполнить HTTP-запрос подписки")
+		return subscriptionResponse{}, errSubscriptionUnavailable
 	}
 	defer resp.Body.Close()
 	if strings.EqualFold(resp.Header.Get("X-Hwid-Max-Devices-Reached"), "true") ||
 		strings.EqualFold(resp.Header.Get("X-Hwid-Limit"), "true") {
-		return "", errHWIDLimit
+		return subscriptionResponse{}, errHWIDLimit
 	}
 	if strings.EqualFold(resp.Header.Get("X-Hwid-Not-Supported"), "true") {
-		return "", errHWIDRequired
+		return subscriptionResponse{}, errHWIDRequired
+	}
+	if resp.StatusCode >= http.StatusInternalServerError {
+		return subscriptionResponse{}, fmt.Errorf("%w: HTTP %d", errSubscriptionUnavailable, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+		return subscriptionResponse{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return subscriptionResponse{}, errSubscriptionUnavailable
 	}
 
-	return string(bodyBytes), nil
+	return subscriptionResponse{body: string(bodyBytes), header: resp.Header}, nil
 }
 
 type subscriptionOutbound struct {
